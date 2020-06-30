@@ -20,7 +20,6 @@ package org.apache.zeppelin.insightedge;
 import org.apache.zeppelin.interpreter.*;
 import org.apache.zeppelin.interpreter.thrift.InterpreterCompletion;
 import org.apache.zeppelin.scheduler.Scheduler;
-import org.apache.zeppelin.spark.DepInterpreter;
 import org.apache.zeppelin.spark.SparkInterpreter;
 import org.insightedge.spark.utils.StringCompiler;
 import scala.collection.Iterator;
@@ -31,6 +30,9 @@ import java.nio.file.Files;
 import java.util.List;
 import java.util.Properties;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Allows to append custom code to spark job. Uses %dep interpreter, so must be called before %spark is initialized.
  * Compiles code written by user, packs it into .jar and adds the jar to %dep interpreter.
@@ -39,7 +41,9 @@ import java.util.Properties;
  */
 public class CompilingInterpreter extends Interpreter {
 
-    private DepInterpreter depInterpreter;
+    private Interpreter interpreter;
+
+    private static final Logger LOG = LoggerFactory.getLogger(CompilingInterpreter.class);
 
     public CompilingInterpreter(Properties property) {
         super(property);
@@ -47,7 +51,7 @@ public class CompilingInterpreter extends Interpreter {
 
     @Override
     public void open() throws InterpreterException{
-        depInterpreter = getDepInterpreter();
+        interpreter = getDepInterpreter();
     }
 
     @Override
@@ -57,8 +61,12 @@ public class CompilingInterpreter extends Interpreter {
     @Override
     public Scheduler getScheduler() {
         // reuse Spark scheduler to make sure %def jobs are run sequentially with %spark ones
-        Interpreter intp =
-                getInterpreterInTheSameSessionByClassName(SparkInterpreter.class.getName());
+        Interpreter intp = null;
+        try {
+            intp = getInterpreterInTheSameSessionByClassName(SparkInterpreter.class);
+        } catch (InterpreterException e) {
+            LOG.error( e.toString(), e );
+        }
         if (intp != null) {
             return intp.getScheduler();
         }
@@ -66,8 +74,8 @@ public class CompilingInterpreter extends Interpreter {
     }
 
     @Override
-    public InterpreterResult interpret(String code, InterpreterContext context) {
-        File outputFolder = null;
+    public InterpreterResult interpret(String code, InterpreterContext context) throws InterpreterException{
+        File outputFolder;
         try {
             outputFolder = Files.createTempDirectory("jars").toFile();
         } catch (IOException up) {
@@ -87,7 +95,7 @@ public class CompilingInterpreter extends Interpreter {
 
         File jar = compiler.packJar();
         String pathToJar = jar.getAbsolutePath().replace("\\", "\\\\"); // replace slashes for Win
-        return depInterpreter.interpret("z.load(\"" + pathToJar + "\")", context);
+        return interpreter.interpret("z.load(\"" + pathToJar + "\")", context);
     }
 
     @Override
@@ -105,14 +113,14 @@ public class CompilingInterpreter extends Interpreter {
     }
 
     @Override
-    public List<InterpreterCompletion> completion(String buf, int cursor, InterpreterContext context) {
-        return depInterpreter.completion(buf, cursor, context);
+    public List<InterpreterCompletion> completion(String buf, int cursor, InterpreterContext context) throws InterpreterException{
+        return interpreter.completion(buf, cursor, context);
     }
 
-    private DepInterpreter getDepInterpreter() throws InterpreterException {
+    private Interpreter getDepInterpreter() throws InterpreterException {
         LazyOpenInterpreter lazy = null;
-        DepInterpreter dep;
-        Interpreter p = getInterpreterInTheSameSessionByClassName(DepInterpreter.class.getName());
+        Interpreter dep;
+        Interpreter p = getInterpreterInTheSameSessionByClassName(SparkInterpreter.class);
 
         while (p instanceof WrappedInterpreter) {
             if (p instanceof LazyOpenInterpreter) {
@@ -120,7 +128,7 @@ public class CompilingInterpreter extends Interpreter {
             }
             p = ((WrappedInterpreter) p).getInnerInterpreter();
         }
-        dep = (DepInterpreter) p;
+        dep = p;
 
         if (lazy != null) {
             lazy.open();
